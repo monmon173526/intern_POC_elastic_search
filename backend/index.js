@@ -12,7 +12,6 @@ app.use(express.json());
     await initElastic(); // 🟢 Ensure index is created BEFORE starting the app
     await syncAllProductsToES();
 
-    // Define routes after index is ready
     app.post('/product', async (req, res) => {
       const { name, description, price, tags } = req.body;
 
@@ -36,12 +35,56 @@ app.use(express.json());
       }
     });
 
-    app.get('/product/search', async (req, res) => {
+    // 🔍 Exact match search
+    app.get('/product/search_exact', async (req, res) => {
       const { q } = req.query;
+      if (!q) return res.status(400).json({ error: 'Missing query' });
 
-      if (!q) {
-        return res.status(400).json({ error: 'Missing search query (q)' });
+      try {
+        const result = await esClient.search({
+          index: 'products',
+          size: 5,
+          query: {
+            match: {
+              name: q
+            }
+          }
+        });
+        res.json(result.hits.hits.map(hit => hit._source));
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Search failed' });
       }
+    });
+
+    // 🔍 Multi-match fuzzy search
+    app.get('/product/search_multi_match', async (req, res) => {
+      const { q } = req.query;
+      if (!q) return res.status(400).json({ error: 'Missing query' });
+
+      try {
+        const result = await esClient.search({
+          index: 'products',
+          size: 5,
+          query: {
+            multi_match: {
+              query: q,
+              fields: ['name', 'description', 'tags'],
+              fuzziness: 'AUTO'
+            }
+          }
+        });
+        res.json(result.hits.hits.map(hit => hit._source));
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Search failed' });
+      }
+    });
+
+    // 🔍 Hybrid search (multi_match + wildcard)
+    app.get('/product/search_hybrid', async (req, res) => {
+      const { q } = req.query;
+      if (!q) return res.status(400).json({ error: 'Missing query' });
 
       try {
         const result = await esClient.search({
@@ -57,26 +100,44 @@ app.use(express.json());
                     fuzziness: 'AUTO'
                   }
                 },
+                { wildcard: { name: `*${q.toLowerCase()}*` } },
+                { wildcard: { description: `*${q.toLowerCase()}*` } },
+                { wildcard: { tags: `*${q.toLowerCase()}*` } }
+              ]
+            }
+          }
+        });
+        res.json(result.hits.hits.map(hit => hit._source));
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Search failed' });
+      }
+    });
+
+    // 🔍 Optimal (multi_match + edge_ngram)
+    app.get('/product/search_optimal', async (req, res) => {
+      const { q } = req.query;
+      if (!q) return res.status(400).json({ error: 'Missing query' });
+
+      try {
+        const result = await esClient.search({
+          index: 'products',
+          size: 5,
+          query: {
+            bool: {
+              should: [
                 {
-                  wildcard: {
-                    name: `*${q.toLowerCase()}*`
-                  }
-                },
-                {
-                  wildcard: {
-                    description: `*${q.toLowerCase()}*`
-                  }
-                },
-                {
-                  wildcard: {
-                    tags: `*${q.toLowerCase()}*`
+                  multi_match: {
+                    query: q,
+                    fields: ['name^3', 'name.edge^5', 'description', 'tags'],
+                    fuzziness: 'AUTO',
+                    type: 'best_fields'
                   }
                 }
               ]
             }
           }
         });
-
         res.json(result.hits.hits.map(hit => hit._source));
       } catch (err) {
         console.error(err);
